@@ -10,6 +10,8 @@ pacman::p_load(
   magrittr,
   patchwork
 )
+ 
+install.packages("nlmixr2")
 
 # Load data
 read_csv("MGOBBI_RISP.csv") -> BBGIMO_RISP
@@ -1109,3 +1111,116 @@ lmtest::coeftest(m.combined,
   )
 )
 
+
+### I want to add the interactive effect between cospiracy mindset and the distrust in official statistics on estimate error, 
+### the paper includes both variables as controls but doesn't test their interaction 
+### new hypothesis: the effect of cospiracy thinking on estimation error is stronger among those who distrust official statistics
+
+# Add interaction term
+lm(car::yjPower(error.immigrants.trim, lambda.err.immigrants.trim) ~
+     consp_01 * trust.stat +  
+     confidence +
+     news.tv + news.paper + news.social +
+     concern.imm +
+     edu.tertiary +
+     lr +
+     age +
+     female +
+     income +
+     abit +
+     country,
+   data = BBGIMO_RISP
+) -> m.immigrants.interaction
+
+# Estimate with robust standard errors
+lmtest::coeftest(m.immigrants.interaction,
+                 vcov. = sandwich::vcovHC(m.immigrants.interaction,
+                                          type = "HC3", cluster = "country"
+                 )
+)
+
+# Load required packages
+library(ggplot2)
+library(dplyr)
+
+# Inverse Yeo-Johnson transformation function
+iYeoJohnson <- function(y, lambda) {
+  out <- numeric(length(y))
+  pos <- y >= 0
+  neg <- !pos
+  
+  if (abs(lambda) < 1e-6) {
+    out[pos] <- exp(y[pos]) - 1
+  } else {
+    out[pos] <- (y[pos] * lambda + 1)^(1 / lambda) - 1
+  }
+  
+  if (abs(lambda - 2) > 1e-6) {
+    out[neg] <- 1 - (-y[neg] * (2 - lambda) + 1)^(1 / (2 - lambda))
+  } else {
+    out[neg] <- 1 - exp(-y[neg])
+  }
+  
+  return(out)
+}
+
+# 1. Create a row with the mean values for all control variables (as fixed covariates)
+baseline_vals <- BBGIMO_RISP %>%
+  summarise(
+    confidence = mean(confidence, na.rm = TRUE),
+    news.tv = mean(news.tv, na.rm = TRUE),
+    news.paper = mean(news.paper, na.rm = TRUE),
+    news.social = mean(news.social, na.rm = TRUE),
+    concern.imm = mean(concern.imm, na.rm = TRUE),
+    edu.tertiary = mean(edu.tertiary, na.rm = TRUE),
+    lr = mean(lr, na.rm = TRUE),
+    age = mean(age, na.rm = TRUE),
+    female = mean(female, na.rm = TRUE),
+    income = mean(income, na.rm = TRUE),
+    abit = names(sort(table(BBGIMO_RISP$abit), decreasing = TRUE))[1],  # moda
+    country = names(sort(table(BBGIMO_RISP$country), decreasing = TRUE))[1]
+  )
+
+# 2. Create prediction grid for the interaction of conspiracy thinking and trust
+pred_data <- expand.grid(
+  consp_01 = seq(0, 1, by = 0.01),
+  trust.stat = c(0, 1)
+)
+
+# 3. Add baseline covariate values to each row
+for (col in names(baseline_vals)) {
+  pred_data[[col]] <- baseline_vals[[col]]
+}
+
+# 4. Predict fitted values and standard errors from the interaction model
+pred_vals <- predict(m.immigrants.interaction, newdata = pred_data, se.fit = TRUE)
+
+# 5. Add prediction and confidence intervals
+pred_data$fit <- pred_vals$fit
+pred_data$se <- pred_vals$se.fit
+pred_data$lower <- pred_data$fit - 1.96 * pred_data$se
+pred_data$upper <- pred_data$fit + 1.96 * pred_data$se
+
+# 6. Apply inverse Yeo-Johnson transformation (use lambda from your model)
+lambda <- lambda.err.immigrants.trim
+pred_data <- pred_data %>%
+  mutate(
+    fit_inv = iYeoJohnson(fit, lambda),
+    lower_inv = iYeoJohnson(lower, lambda),
+    upper_inv = iYeoJohnson(upper, lambda),
+    trust_label = factor(trust.stat, levels = c(0, 1),
+                         labels = c("No trust", "Trust"))
+  )
+
+# 7. Plot with ggplot2
+ggplot(pred_data, aes(x = consp_01, y = fit_inv, color = trust_label, fill = trust_label)) +
+  geom_line(size = 1.2) +
+  geom_ribbon(aes(ymin = lower_inv, ymax = upper_inv), alpha = 0.2, color = NA) +
+  labs(
+    title = "Interaction: Conspiracy Thinking × Trust in Statistics",
+    x = "Conspiracy Thinking",
+    y = "Predicted Estimation Error (Back-transformed)",
+    color = "Trust in Statistics",
+    fill = "Trust in Statistics"
+  ) +
+  theme_minimal(base_size = 13)
